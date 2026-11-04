@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>도서 추천 — 당신을 위한 책</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --muted: #666;
+    --card-bg: #f4f4f6; --accent: #4f46e5; --border: #e2e2e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #121212; --fg: #f0f0f0; --muted: #a0a0a8;
+      --card-bg: #1e1e22; --accent: #8b87f7; --border: #333338; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Pretendard", "Apple SD Gothic Neo", sans-serif;
+    margin: 0; padding: 24px 16px 48px; max-width: 720px; margin-inline: auto; line-height: 1.6;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: 4px; }
+  p.sub { color: var(--muted); margin-top: 0; font-size: 0.9rem; }
+
+  #onboarding { margin-top: 20px; }
+  .genre-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 16px; }
+  .genre-btn {
+    padding: 14px 10px; border-radius: 10px; border: 1.5px solid var(--border);
+    background: var(--card-bg); color: var(--fg); font-size: 0.95rem; font-weight: 500;
+    cursor: pointer; text-align: center;
+  }
+  .genre-btn.selected { border-color: var(--accent); background: var(--accent); color: #fff; }
+  #genre-hint { color: var(--muted); font-size: 0.85rem; margin-top: 10px; }
+
+  button {
+    margin-top: 16px; padding: 10px 16px; border-radius: 8px; border: none;
+    background: var(--accent); color: #fff; font-weight: 600; font-size: 0.95rem; cursor: pointer;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.secondary { background: none; border: 1px solid var(--border); color: var(--fg); }
+
+  #feed-screen { display: none; margin-top: 20px; }
+  .feed-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .feed-header h2 { font-size: 1.05rem; margin: 0; }
+
+  .book-card {
+    background: var(--card-bg); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; margin-top: 12px;
+  }
+  .book-card summary {
+    cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px;
+    font-weight: 600; font-size: 1rem;
+  }
+  .book-card summary::-webkit-details-marker { display: none; }
+  .book-card summary::before {
+    content: "▸"; display: inline-block; color: var(--accent);
+    transition: transform 0.15s ease; font-size: 0.85em;
+  }
+  .book-card[open] summary::before { transform: rotate(90deg); }
+  .book-card .genre-tag {
+    font-size: 0.75rem; color: var(--muted); font-weight: 400;
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+  }
+  .book-card .description { color: var(--muted); font-size: 0.88rem; margin: 8px 0 0 0; line-height: 1.55; }
+
+  #status { font-size: 0.85rem; color: var(--muted); margin-top: 14px; }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+    vertical-align: middle; margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+  <div id="onboarding">
+    <h1>📚 당신을 위한 책 추천</h1>
+    <p class="sub">관심 있는 장르를 <b>3개</b> 골라주세요. 신경망 임베딩으로 그 장르들과 의미적으로 가까운 책들을 모아서 보여드릴게요.</p>
+    <div class="genre-grid" id="genre-grid"></div>
+    <div id="genre-hint">0 / 3개 선택됨</div>
+    <button id="start-btn" disabled>추천 받으러 가기</button>
+  </div>
+
+  <div id="feed-screen">
+    <div class="feed-header">
+      <h2 id="feed-title">추천 도서</h2>
+      <div>
+        <button class="secondary" id="change-genre-btn">장르 다시 고르기</button>
+        <button id="refresh-btn">새로고침</button>
+      </div>
+    </div>
+    <div id="status"></div>
+    <div id="book-list"></div>
+  </div>
+
+<script type="module">
+  import { BOOKS } from "./data.js";
+  import { BookRecommender } from "./recommender.js";
+
+  const GENRES = ["SF", "에세이", "자기계발", "인문", "추리", "로맨스"];
+  const TOTAL_COUNT = 10; // 피드에 보여줄 총 책 권수 (이 중 1/5이 세렌디피티로 자동 계산됨)
+
+  const onboardingEl = document.getElementById("onboarding");
+  const feedScreenEl = document.getElementById("feed-screen");
+  const genreGrid = document.getElementById("genre-grid");
+  const genreHint = document.getElementById("genre-hint");
+  const startBtn = document.getElementById("start-btn");
+  const changeGenreBtn = document.getElementById("change-genre-btn");
+  const refreshBtn = document.getElementById("refresh-btn");
+  const statusEl = document.getElementById("status");
+  const bookListEl = document.getElementById("book-list");
+  const feedTitleEl = document.getElementById("feed-title");
+
+  let selectedGenres = [];
+  let rec = null;
+
+  // ---------- 1. 장르 선택 화면 구성 ----------
+  GENRES.forEach((genre) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "genre-btn";
+    btn.textContent = genre;
+    btn.addEventListener("click", () => toggleGenre(genre, btn));
+    genreGrid.appendChild(btn);
+  });
+
+  function toggleGenre(genre, btn) {
+    const idx = selectedGenres.indexOf(genre);
+    if (idx === -1) {
+      if (selectedGenres.length >= 3) return;
+      selectedGenres.push(genre);
+      btn.classList.add("selected");
+    } else {
+      selectedGenres.splice(idx, 1);
+      btn.classList.remove("selected");
+    }
+    genreHint.textContent = `${selectedGenres.length} / 3개 선택됨`;
+    startBtn.disabled = selectedGenres.length !== 3;
+  }
+
+  startBtn.addEventListener("click", async () => {
+    onboardingEl.style.display = "none";
+    feedScreenEl.style.display = "block";
+    feedTitleEl.textContent = `${selectedGenres.join(", ")} 기반 추천`;
+    await ensureRecommenderReady();
+    await showFeed();
+  });
+
+  changeGenreBtn.addEventListener("click", () => {
+    feedScreenEl.style.display = "none";
+    onboardingEl.style.display = "block";
+  });
+
+  refreshBtn.addEventListener("click", showFeed);
+
+  // ---------- 2. 모델/책 벡터 준비 ----------
+  async function ensureRecommenderReady() {
+    if (rec) return;
+    statusEl.innerHTML = '<span class="spinner"></span>임베딩 모델을 불러오는 중입니다 (최초 1회, 약 50MB)...';
+    rec = await BookRecommender.create(BOOKS, (progress) => {
+      if (progress && progress.status === "progress" && typeof progress.progress === "number") {
+        statusEl.innerHTML = `<span class="spinner"></span>모델 다운로드 중... ${Math.round(progress.progress)}%`;
+      }
+    });
+    statusEl.textContent = "";
+  }
+
+  // ---------- 3. 추천 피드 렌더링 ----------
+  async function showFeed() {
+    refreshBtn.disabled = true;
+    bookListEl.innerHTML = '<p class="sub"><span class="spinner"></span>추천 책을 고르는 중...</p>';
+
+    const feed = await rec.recommendForGenres(selectedGenres, TOTAL_COUNT, 0.3);
+
+    // 디버그용: 어떤 책이 세렌디피티로 뽑혔는지는 화면엔 안 보이고, 콘솔에만 남긴다
+    // (탐구보고서 분석·면접 설명용. 사용자에게는 절대 노출하지 않음)
+    console.log(
+      "이번 추천 중 세렌디피티로 뽑힌 책:",
+      feed.filter((f) => f.isSerendipity).map((f) => rec.books[f.index].title)
+    );
+
+    const books = feed.map((f) => rec.books[f.index]);
+    bookListEl.innerHTML = books
+      .map(
+        (b) => `
+      <details class="book-card">
+        <summary>${b.title} <span class="genre-tag">${b.genre}</span></summary>
+        <p class="description">${b.description}</p>
+      </details>`
+      )
+      .join("");
+
+    refreshBtn.disabled = false;
+  }
+</script>
+</body>
+</html>
